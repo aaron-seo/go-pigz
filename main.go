@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"runtime"
+	"sync"
 )
 
 const (
@@ -13,6 +14,7 @@ const (
 	DICT_SIZE  = 32 * 1024  // 32 KiB
 )
 
+// For parsing processes flag
 var processes int
 
 func init() {
@@ -24,43 +26,73 @@ func init() {
 	flag.IntVar(&processes, "p", defaultProcesses, usage)
 }
 
+// This implementation of concurrent compression utilizes the pipelined
+// fan-out, fan-in concurrency pattern as described in
+// https://go.dev/blog/pipelines
+// There are three stages for a Block to be pipelined through:
+// (1) Read stage
+// (2) Compress stage
+// (3) Write stage
 func main() {
 	// Parse arguments
 	flag.Parse()
 
-	// List of write jobs
-	blockIndex := 0
+	r := read()
 
-	writeTasks
+	// TODO should be p num of outbounds for compress
+	c1 := compress(r)
+	c2 := compress(r)
 
-	// Launch write goroutine
-	go write()
+	for c := range merge(c1, c2) {
+		write(c)
+	}
+}
+
+func read() <-chan Block {
+	out := make(chan Block)
 
 	// Start reading input from Stdin in byte array buffers with BLOCK_SIZE
-	inputBuffer := make([]byte, BLOCK_SIZE, BLOCK_SIZE)
-	var nBytesRead int
+	readBuffer := make([]byte, BLOCK_SIZE, BLOCK_SIZE)
+
+	var numBytesTotal int
+	var numBlocks int
+
 	reader := bufio.NewReader(os.Stdin)
-	numBytes, err := reader.Read(inputBuffer)
+	numBytes, err := reader.Read(readBuffer)
 	for err != io.EOF {
 		numBytesTotal += numBytes
-		numBytes, err = reader.Read(inputBuffer)
+		numBytes, err = reader.Read(readBuffer)
+
+		// check if readBuffer is the lastBlock in buffer
+		lastBlock := false
+		_, err = reader.Peek(1)
+		if err == bufio.ErrNegativeCount {
+			lastBlock = true
+		}
+
+		numBlocks++
+		out <- new(Block{
+			index:     numBlocks,
+			lastBlock: false,
+			inputBuffer, readBuffer,
+		})
 	}
+	return out
+}
+func compress(in <-chan Block) <-chan Block {
+}
+
+func write(in <-chan Block) {
+}
+
+func merge(cs ...<-chan Block) <-chan Block {
+	var wg sync.WaitGroup
 
 }
 
 type Block struct {
-	Index       int
-	LastBlock   bool
-	InputBuffer []byte
-}
-
-func compress(block Block) {
-}
-
-func write() {
-	// Write header
-
-	// Listen for write tasks in the pool
-
-	// Write trailer
+	index        int
+	lastBlock    bool
+	inputBuffer  []byte
+	outputBuffer []byte
 }
