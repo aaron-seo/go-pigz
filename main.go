@@ -6,15 +6,16 @@ import (
 	"io"
 	"os"
 	"runtime"
-	"sync"
 )
 
+// Declaration of global constants
 const (
 	BLOCK_SIZE = 128 * 1024 // 128 KiB
 	DICT_SIZE  = 32 * 1024  // 32 KiB
+	SUM_SIZE   = 8          // 8 bytes
 )
 
-// For parsing processes flag
+// Parsing processes flag
 var processes int
 
 func init() {
@@ -26,44 +27,48 @@ func init() {
 	flag.IntVar(&processes, "p", defaultProcesses, usage)
 }
 
-// This implementation of concurrent compression utilizes the pipelined
+// This implementation of concurrent compression utilizes the pipelined,
 // fan-out, fan-in concurrency pattern as described in
 // https://go.dev/blog/pipelines
 // There are three stages for a Block to be pipelined through:
 // (1) Read stage
 // (2) Compress stage
 // (3) Write stage
+// Just realized, we want compress to happen concurrent with read...
+// This current strategy doesn't do that... We'll benchmark later.
 func main() {
 	// Parse arguments
 	flag.Parse()
 
 	r := read()
 
-	// TODO should be p num of outbounds for compress
-	c1 := compress(r)
-	c2 := compress(r)
+	compressOutbounds := make([]<-chan block, processes)
+	for p := 0; p < processes; p++ {
+		compressOutbounds[p] = compress(r)
+	}
 
-	for c := range merge(c1, c2) {
+	for c := range mergeSlice(compressOutbounds) {
 		write(c)
 	}
 }
 
-func read() <-chan Block {
-	out := make(chan Block)
+// Read stage
+func read() <-chan block {
+	out := make(chan block)
 
 	// Start reading input from Stdin in byte array buffers with BLOCK_SIZE
-	readBuffer := make([]byte, BLOCK_SIZE, BLOCK_SIZE)
+	inputBuffer := make([]byte, BLOCK_SIZE, BLOCK_SIZE)
 
 	var numBytesTotal int
 	var numBlocks int
 
 	reader := bufio.NewReader(os.Stdin)
-	numBytes, err := reader.Read(readBuffer)
+	numBytes, err := reader.Read(inputBuffer)
 	for err != io.EOF {
 		numBytesTotal += numBytes
-		numBytes, err = reader.Read(readBuffer)
+		numBytes, err = reader.Read(inputBuffer)
 
-		// check if readBuffer is the lastBlock in buffer
+		// check if readBuffer is the last block in the buffer
 		lastBlock := false
 		_, err = reader.Peek(1)
 		if err == bufio.ErrNegativeCount {
@@ -71,28 +76,34 @@ func read() <-chan Block {
 		}
 
 		numBlocks++
-		out <- new(Block{
+		out <- new(block{
 			index:     numBlocks,
 			lastBlock: false,
-			inputBuffer, readBuffer,
+			data:      inputBuffer,
 		})
 	}
 	return out
 }
-func compress(in <-chan Block) <-chan Block {
+
+// Compress stage
+func compress(in <-chan block) <-chan block {
 }
 
-func write(in <-chan Block) {
+// Write stage
+func write(in <-chan block) {
 }
 
-func merge(cs ...<-chan Block) <-chan Block {
-	var wg sync.WaitGroup
-
+// mergeList fans-in slice of results from the compress goroutines into the write stage
+func mergeSlice(compressOutbounds []<-chan block) <-chan block {
 }
 
-type Block struct {
-	index        int
-	lastBlock    bool
-	inputBuffer  []byte
-	outputBuffer []byte
+func merge(cs ...<-chan block) <-chan block {
+}
+
+type block struct {
+	index     int
+	lastBlock bool
+	data      [BLOCK_SIZE]byte
+	crc32     [SUM_SIZE]byte
+	err       error
 }
