@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"compress/flate"
-	"encoding/binary"
 	"flag"
 	"hash"
 	"hash/crc32"
@@ -18,10 +17,10 @@ import (
 
 // Declaration of global constants
 const (
-	BLOCK_SIZE   = 128 * 1024 // 128 KiB
-	DICT_SIZE    = 32 * 1024  // 32 KiB
+	BLOCK_SIZE = 128 * 1024 // 128 KiB
+	DICT_SIZE  = 32 * 1024  // 32 KiB
 	TRAILER_SIZE = 8
-	SUM_SIZE     = 8 // 8 bytes
+	SUM_SIZE   = 8          // 8 bytes
 )
 
 // Parsing processes flag
@@ -36,10 +35,8 @@ func init() {
 	flag.IntVar(&processes, "p", defaultProcesses, usage)
 }
 
-// checksum globals
 var checksum hash.Hash32
 var checksumChan chan []byte
-var nTotalBytes uint32
 
 // This implementation of concurrent compression utilizes the pipelined,
 // fan-out, fan-in concurrency pattern as described in
@@ -57,7 +54,6 @@ func main() {
 		checksum = crc32.NewIEEE()
 		for data := range checksumChan {
 			checksum.Write(data)
-			log.Println("wrote checksum")
 		}
 		close(checksumChan)
 	}()
@@ -66,11 +62,9 @@ func main() {
 
 	c := compress(r)
 
-	//writeHeader()
 	for output := range c {
 		write(output)
 	}
-	writeTrailer()
 
 	/*
 		compressOutbounds := make([]<-chan *block, processes)
@@ -86,17 +80,20 @@ func main() {
 
 // Read stage
 func read() <-chan *block {
+	log.Println("reading")
 	out := make(chan *block)
 
 	go func() {
 		// Start reading input from Stdin in byte array buffers with BLOCK_SIZE
 		inputBuffer := make([]byte, BLOCK_SIZE, BLOCK_SIZE)
 
+		var numBytesTotal int
 		var numBlocks int
 
 		reader := bufio.NewReader(os.Stdin)
 		numBytes, err := reader.Read(inputBuffer)
 		for err != io.EOF {
+			numBytesTotal += numBytes
 			numBytes, err = reader.Read(inputBuffer)
 
 			// check if readBuffer is the last block in the buffer
@@ -112,12 +109,10 @@ func read() <-chan *block {
 				Index:     numBlocks,
 				LastBlock: isLastBlock,
 				RawData:   inputBuffer,
-				nRawBytes: numBytes,
 			}
 
 			// checksum
 			checksumChan <- inputBuffer
-			nTotalBytes += uint32(numBytes)
 
 			log.Println("read block#" + strconv.Itoa(b.Index))
 			out <- &b
@@ -141,27 +136,22 @@ func compress(in <-chan *block) <-chan *block {
 			if err != nil {
 				log.Fatal(err)
 			}
-
-			n, err := io.Copy(flateWriter, bytes.NewReader(b.RawData))
-			if err != nil {
+			if _, err := io.Copy(flateWriter, bytes.NewReader(b.RawData)); err != nil {
 				log.Fatal(err)
 			}
-
 			if !b.LastBlock {
 				if err := flateWriter.Flush(); err != nil {
 					log.Fatal(err)
 				}
 			}
-
 			if err := flateWriter.Close(); err != nil {
 				log.Fatal(err)
 			}
 
 			b.CompressedData = buffer.Bytes()
-			b.nCompressedBytes = int(n)
 
-			out <- b
 			log.Println("compressed block#" + strconv.Itoa(b.Index))
+			out <- b
 		}
 		close(out)
 	}()
@@ -169,9 +159,11 @@ func compress(in <-chan *block) <-chan *block {
 	return out
 }
 
-func writeHeader() {
+// Write stage
+func write(b *block) {
 	w := bufio.NewWriter(os.Stdout)
 
+	// Header
 	headerBytes := make([]byte, 10)
 	headerBytes[0] = 0x1f
 	headerBytes[1] = 0x8b
@@ -185,26 +177,18 @@ func writeHeader() {
 	headerBytes[9] = 0x03
 
 	w.Write(headerBytes)
-	log.Println("wrote header")
-}
 
-func writeTrailer() {
-	w := bufio.NewWriter(os.Stdout)
+	// Body
+	w.Write(b.CompressedData)
 
+	// Trailer
 	trailerBuf := make([]byte, TRAILER_SIZE)
 	le := binary.LittleEndian
-	le.PutUint32(trailerBuf[:4], checksum.Sum32())
-	le.PutUint32(trailerBuf[4:8], nTotalBytes)
-	w.Write(trailerBuf)
-	log.Println("wrote trailer")
+	le.PutUint32
+
+	w.Write(checksum.Sum32())
 
 	w.Flush()
-}
-
-// Write stage
-func write(b *block) {
-	w := bufio.NewWriter(os.Stdout)
-	w.Write(b.CompressedData)
 
 	log.Println("wrote block#" + strconv.Itoa(b.Index))
 }
@@ -239,11 +223,9 @@ func merge(cs ...<-chan *block) <-chan *block {
 }
 
 type block struct {
-	Index            int
-	LastBlock        bool
-	RawData          []byte
-	CompressedData   []byte
-	nRawBytes        int
-	nCompressedBytes int
-	Err              error
+	Index          int
+	LastBlock      bool
+	RawData        []byte
+	CompressedData []byte
+	Err            error
 }
